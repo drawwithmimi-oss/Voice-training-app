@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Training Companion</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef, useEffect, useCallback } = React;
+
+        function VoiceTrainingApp() {
+            const [isRecording, setIsRecording] = useState(false);
+            const [isDronePlaying, setIsDronePlaying] = useState(false);
+            const [selectedNote, setSelectedNote] = useState('C4');
+            const [currentPitch, setCurrentPitch] = useState(0);
+            const [recordings, setRecordings] = useState([]);
+            const [sessionNotes, setSessionNotes] = useState('');
+            const [resonanceRating, setResonanceRating] = useState(3);
+            const [breathinessRating, setBreathinessRating] = useState(3);
+            const [overallRating, setOverallRating] = useState(3);
+            const [micPermission, setMicPermission] = useState('pending');
+            const [audioInitialized, setAudioInitialized] = useState(false);
+            
+            const audioContextRef = useRef(null);
+            const oscillatorRef = useRef(null);
+            const gainNodeRef = useRef(null);
+            const mediaRecorderRef = useRef(null);
+            const analyserRef = useRef(null);
+            const micStreamRef = useRef(null);
+            const pitchDetectionRef = useRef(null);
+
+            const notes = {
+                'A3': 220.00,
+                'B3': 246.94,
+                'C4': 261.63,
+                'C#4': 277.18,
+                'D4': 293.66,
+                'D#4': 311.13,
+                'E4': 329.63,
+                'F4': 349.23,
+                'F#4': 369.99,
+                'G4': 392.00
+            };
+
+            // Initialize Audio Context
+            const initAudio = useCallback(async () => {
+                try {
+                    // Request microphone permission
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            echoCancellation: false,
+                            noiseSuppression: false,
+                            autoGainControl: false
+                        } 
+                    });
+                    
+                    micStreamRef.current = stream;
+                    setMicPermission('granted');
+                    
+                    // Create audio context
+                    if (!audioContextRef.current) {
+                        audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+                    }
+                    
+                    // Set up analyser for pitch detection
+                    const source = audioContextRef.current.createMediaStreamSource(stream);
+                    analyserRef.current = audioContextRef.current.createAnalyser();
+                    analyserRef.current.fftSize = 2048;
+                    source.connect(analyserRef.current);
+                    
+                    setAudioInitialized(true);
+                    startPitchDetection();
+                    
+                } catch (error) {
+                    console.error('Microphone error:', error);
+                    setMicPermission('denied');
+                }
+            }, []);
+
+            // Pitch Detection
+            const startPitchDetection = useCallback(() => {
+                if (!analyserRef.current || !audioContextRef.current) return;
+
+                const bufferLength = analyserRef.current.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+
+                const detect = () => {
+                    if (!analyserRef.current) return;
+                    
+                    analyserRef.current.getByteFrequencyData(dataArray);
+                    
+                    // Find dominant frequency
+                    let maxValue = 0;
+                    let maxIndex = 0;
+                    
+                    for (let i = 0; i < bufferLength; i++) {
+                        if (dataArray[i] > maxValue) {
+                            maxValue = dataArray[i];
+                            maxIndex = i;
+                        }
+                    }
+                    
+                    if (maxValue > 50) {
+                        const nyquist = audioContextRef.current.sampleRate / 2;
+                        const frequency = (maxIndex * nyquist) / bufferLength;
+                        
+                        // Filter for voice range
+                        if (frequency > 80 && frequency < 500) {
+                            setCurrentPitch(Math.round(frequency));
+                        }
+                    } else {
+                        setCurrentPitch(0);
+                    }
+                    
+                    pitchDetectionRef.current = requestAnimationFrame(detect);
+                };
+                
+                detect();
+            }, []);
+
+            // Start/Stop Drone
+            const toggleDrone = useCallback(() => {
+                if (!audioContextRef.current) {
+                    alert('Please allow microphone access first');
+                    return;
+                }
+
+                if (isDronePlaying && oscillatorRef.current) {
+                    oscillatorRef.current.stop();
+                    oscillatorRef.current = null;
+                    setIsDronePlaying(false);
+                } else {
+                    try {
+                        const osc = audioContextRef.current.createOscillator();
+                        const gain = audioContextRef.current.createGain();
+                        
+                        osc.type = 'sine';
+                        osc.frequency.value = notes[selectedNote];
+                        gain.gain.value = 0.3;
+                        
+                        osc.connect(gain);
+                        gain.connect(audioContextRef.current.destination);
+                        
+                        osc.start();
+                        oscillatorRef.current = osc;
+                        gainNodeRef.current = gain;
+                        setIsDronePlaying(true);
+                    } catch (error) {
+                        console.error('Drone error:', error);
+                    }
+                }
+            }, [isDronePlaying, selectedNote]);
+
+            // Recording Functions
+            const startRecording = useCallback(async () => {
+                if (!micStreamRef.current) {
+                    alert('Microphone not available');
+                    return;
+                }
+
+                try {
+                    const recorder = new MediaRecorder(micStreamRef.current);
+                    const chunks = [];
+                    
+                    recorder.ondataavailable = (e) => {
+                        if (e.data.size > 0) chunks.push(e.data);
+                    };
+                    
+                    recorder.onstop = () => {
+                        const blob = new Blob(chunks, { type: 'audio/webm' });
+                        const url = URL.createObjectURL(blob);
+                        
+                        setRecordings(prev => [...prev, {
+                            id: Date.now(),
+                            url,
+                            timestamp: new Date().toLocaleTimeString(),
+                            targetNote: selectedNote,
+                            resonance: resonanceRating,
+                            breathiness: breathinessRating,
+                            overall: overallRating,
+                            notes: sessionNotes
+                        }]);
+                        
+                        setSessionNotes('');
+                    };
+                    
+                    recorder.start();
+                    mediaRecorderRef.current = recorder;
+                    setIsRecording(true);
+                } catch (error) {
+                    console.error('Recording error:', error);
+                    alert('Recording failed: ' + error.message);
+                }
+            }, [selectedNote, resonanceRating, breathinessRating, overallRating, sessionNotes]);
+
+            const stopRecording = useCallback(() => {
+                if (mediaRecorderRef.current && isRecording) {
+                    mediaRecorderRef.current.stop();
+                    setIsRecording(false);
+                }
+            }, [isRecording]);
+
+            // Initialize on mount
+            useEffect(() => {
+                initAudio();
+                
+                return () => {
+                    // Cleanup
+                    if (pitchDetectionRef.current) {
+                        cancelAnimationFrame(pitchDetectionRef.current);
+                    }
+                    if (oscillatorRef.current) {
+                        oscillatorRef.current.stop();
+                    }
+                    if (micStreamRef.current) {
+                        micStreamRef.current.getTracks().forEach(track => track.stop());
+                    }
+                    if (audioContextRef.current) {
+                        audioContextRef.current.close();
+                    }
+                };
+            }, [initAudio]);
+
+            // Handle note change while drone is playing
+            useEffect(() => {
+                if (isDronePlaying && oscillatorRef.current) {
+                    oscillatorRef.current.frequency.value = notes[selectedNote];
+                }
+            }, [selectedNote, isDronePlaying]);
+
+            const getPitchColor = () => {
+                if (currentPitch === 0) return 'text-gray-400';
+                const target = notes[selectedNote];
+                const diff = Math.abs(currentPitch - target);
+                if (diff < 5) return 'text-green-500';
+                if (diff < 15) return 'text-yellow-500';
+                return 'text-red-500';
+            };
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-purple-50 to-pink-50 p-4">
+                    <div className="max-w-4xl mx-auto">
+                        <header className="text-center mb-8">
+                            <h1 className="text-4xl font-bold text-gray-800 mb-2">Voice Training Companion</h1>
+                            <p className="text-gray-600">Practice pitch, resonance, and track your progress</p>
+                        </header>
+
+                        {/* Microphone Permission Banner */}
+                        {micPermission === 'denied' && (
+                            <div className="mb-6 p-4 bg-red-100 border border-red-300 rounded-lg">
+                                <p className="text-red-800">❌ Microphone access denied. Please allow microphone access and refresh the page.</p>
+                            </div>
+                        )}
+
+                        {micPermission === 'pending' && (
+                            <div className="mb-6 p-4 bg-yellow-100 border border-yellow-300 rounded-lg">
+                                <p className="text-yellow-800">🎤 Requesting microphone access...</p>
+                            </div>
+                        )}
+
+                        <div className="grid md:grid-cols-2 gap-6">
+                            {/* Pitch Drone Section */}
+                            <div className="bg-white rounded-xl shadow-lg p-6">
+                                <h2 className="text-2xl font-semibold mb-4 text-gray-800">Pitch Drone</h2>
+                                
+                                <div className="mb-4">
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                        Target Note
+                                    </label>
+                                    <select 
+                                        value={selectedNote}
+                                        onChange={(e) => setSelectedNote(e.target.value)}
+                                        className="w-full p-2 border border-gray-300 rounded-lg"
+                                    >
+                                        {Object.entries(notes).map(([note, freq]) => (
+                                            <option key={note} value={note}>
+                                                {note} ({Math.round(freq)} Hz)
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                <button
+                                    onClick={toggleDrone}
+                                    disabled={!audioInitialized}
+                                    className={`w-full py-3 rounded-lg font-medium transition-colors ${
+                                        !audioInitialized 
+                                            ? 'bg-gray-300 text-gray-500' 
+                                            : isDronePlaying 
+                                                ? 'bg-red-500 hover:bg-red-600 text-white' 
+                                                : 'bg-purple-500 hover:bg-purple-600 text-white'
+                                    }`}
+                                >
+                                    {isDronePlaying ? '⏹ Stop Drone' : '▶ Start Drone'}
+                                </button>
+
+                                <div className="mt-6 text-center">
+                                    <div className="text-sm text-gray-600 mb-1">Your Pitch</div>
+                                    <div className={`text-3xl font-bold ${getPitchColor()}`}>
+                                        {currentPitch > 0 ? `${currentPitch} Hz` : '---'}
+                                    </div>
+                                    <div className="text-xs text-gray-500 mt-1">
+                                        Target: {Math.round(notes[selectedNote])} Hz
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Recording Section */}
+                            <div className="bg-white rounded-xl shadow-lg p-6">
+                                <h2 className="text-2xl font-semibold mb-4 text-gray-800">Recording</h2>
+                                
+                                <button
+                                    onClick={isRecording ? stopRecording : startRecording}
+                                    disabled={!audioInitialized}
+                                    className={`w-full py-3 rounded-lg font-medium transition-colors mb-4 ${
+                                        !audioInitialized 
+                                            ? 'bg-gray-300 text-gray-500' 
+                                            : isRecording 
+                                                ? 'bg-red-500 hover:bg-red-600 text-white animate-pulse' 
+                                                : 'bg-blue-500 hover:bg-blue-600 text-white'
+                                    }`}
+                                >
+                                    {isRecording ? '⏹ Stop Recording' : '🎤 Start Recording'}
+                                </button>
+
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">
+                                            Resonance: {resonanceRating}/5
+                                        </label>
+                                        <input
+                                            type="range"
+                                            min="1"
+                                            max="5"
+                                            value={resonanceRating}
+                                            onChange={(e) => setResonanceRating(Number(e.target.value))}
+                                            className="w-full"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">
+                                            Breathiness: {breathinessRating}/5
+                                        </label>
+                                        <input
+                                            type="range"
+                                            min="1"
+                                            max="5"
+                                            value={breathinessRating}
+                                            onChange={(e) => setBreathinessRating(Number(e.target.value))}
+                                            className="w-full"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">
+                                            Overall: {overallRating}/5
+                                        </label>
+                                        <input
+                                            type="range"
+                                            min="1"
+                                            max="5"
+                                            value={overallRating}
+                                            onChange={(e) => setOverallRating(Number(e.target.value))}
+                                            className="w-full"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">Notes</label>
+                                        <textarea
+                                            value={sessionNotes}
+                                            onChange={(e) => setSessionNotes(e.target.value)}
+                                            placeholder="What did you work on?"
+                                            className="w-full p-2 border border-gray-300 rounded-lg"
+                                            rows="2"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Recordings History */}
+                        {recordings.length > 0 && (
+                            <div className="mt-8 bg-white rounded-xl shadow-lg p-6">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h2 className="text-2xl font-semibold text-gray-800">Recordings</h2>
+                                    <button
+                                        onClick={() => setRecordings([])}
+                                        className="px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-lg text-sm"
+                                    >
+                                        Clear All
+                                    </button>
+                                </div>
+                                
+                                <div className="space-y-3">
+                                    {recordings.slice().reverse().map((rec) => (
+                                        <div key={rec.id} className="border border-gray-200 rounded-lg p-3">
+                                            <div className="flex items-center gap-3 mb-2">
+                                                <audio controls src={rec.url} className="flex-1" />
+                                                <span className="text-sm text-gray-600">{rec.timestamp}</span>
+                                            </div>
+                                            <div className="flex gap-2 text-xs">
+                                                <span className="bg-purple-100 text-purple-800 px-2 py-1 rounded">
+                                                    {rec.targetNote}
+                                                </span>
+                                                <span className="bg-green-100 text-green-800 px-2 py-1 rounded">
+                                                    R: {rec.resonance}/5
+                                                </span>
+                                                <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">
+                                                    B: {rec.breathiness}/5
+                                                </span>
+                                                <span className="bg-gray-100 text-gray-800 px-2 py-1 rounded">
+                                                    O: {rec.overall}/5
+                                                </span>
+                                            </div>
+                                            {rec.notes && (
+                                                <p className="text-sm text-gray-600 mt-2">{rec.notes}</p>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Tips Section */}
+                        <div className="mt-8 bg-gradient-to-r from-purple-100 to-pink-100 rounded-xl p-6">
+                            <h3 className="text-xl font-semibold mb-3 text-gray-800">Quick Tips from Your Lessons</h3>
+                            <div className="grid md:grid-cols-2 gap-3 text-sm">
+                                <div className="bg-white/70 rounded p-3">
+                                    <strong className="text-purple-700">Pitch:</strong> C4 (261 Hz) is your comfort zone. Focus on consistency.
+                                </div>
+                                <div className="bg-white/70 rounded p-3">
+                                    <strong className="text-purple-700">Resonance:</strong> Think "forward" not "up". Place voice in face mask.
+                                </div>
+                                <div className="bg-white/70 rounded p-3">
+                                    <strong className="text-purple-700">Breathiness:</strong> Gentle airflow, slide between whisper and full voice.
+                                </div>
+                                <div className="bg-white/70 rounded p-3">
+                                    <strong className="text-purple-700">Integration:</strong> Combine all elements - takes practice!
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Render the app
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<VoiceTrainingApp />);
+    </script>
+</body>
+</html>
