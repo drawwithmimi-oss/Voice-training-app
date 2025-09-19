@@ -216,7 +216,7 @@ I embrace my unique vocal qualities.`
                     
                     osc.type = 'sine';
                     osc.frequency.value = notes[selectedNote];
-                    gain.gain.value = 0.4; // Quieter for reading
+                    gain.gain.value = 1; // Quieter for reading
                     
                     osc.connect(gain);
                     gain.connect(audioContextRef.current.destination);
